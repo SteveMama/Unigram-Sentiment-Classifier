@@ -10,8 +10,9 @@ print(stopwords.words('english'))
 seed_value = 0
 np.random.seed(seed_value)
 random.seed(seed_value)
-from collections import Counter
-import matplotlib.pyplot as plt
+from collections import Counter, defaultdict
+#import matplotlib.pyplot as plt
+#from sklearn.feature_extraction.text import TfidfVectorizer
 
 class FeatureExtractor(object):
     """
@@ -69,15 +70,73 @@ class BigramFeatureExtractor(FeatureExtractor):
     Bigram feature extractor analogous to the unigram one.
     """
     def __init__(self, indexer: Indexer):
-        raise Exception("Must be implemented")
+        self.indexer = indexer
+        self.stopwords = set(stopwords.words('english'))
+
+    def get_indexer(self):
+        return self.indexer
+
+    def extract_features(self, sentence: List[str], add_to_indexer: bool=False) -> Counter:
+        features = Counter()
+
+        for i in range(len(sentence)-1):
+            bigram = (sentence[i].lower().strip(string.punctuation), sentence[i+1].lower().strip(string.punctuation))
+            if bigram[0] and bigram[0] not in self.stopwords and bigram[1] and bigram[1] not in self.stopwords:
+                bigram_feature = f"Bigram={bigram[0]}|{bigram[1]}"
+                if add_to_indexer:
+                    idx = self.indexer.add_and_get_index(bigram_feature, add=True)
+                else:
+                    idx = self.indexer.index_of(bigram_feature)
+                if idx != -1:
+                    features[idx] += 1
+        return features
 
 
 class BetterFeatureExtractor(FeatureExtractor):
-    """
-    Better feature extractor...try whatever you can think of!
-    """
     def __init__(self, indexer: Indexer):
-        raise Exception("Must be implemented")
+        self.indexer = indexer
+        self.document_count = defaultdict(int)
+        self.total_docs = 0
+
+    def get_indexer(self):
+        return self.indexer
+
+    def add_document(self, sentence):
+
+        self.total_docs += 1
+        unique_words = set(word.lower().strip(string.punctuation) for word in sentence if word)
+        for word in unique_words:
+            self.document_count[word] += 1
+
+    def calculate_idf(self, word):
+
+        if word in self.document_count:
+            return np.log(self.total_docs / (1 + self.document_count[word]))
+        else:
+            return 0
+
+    def extract_features(self, sentence: List[str], add_to_indexer: bool = False) -> Counter:
+        tf_counter = Counter()
+        for word in sentence:
+            word = word.lower().strip(string.punctuation)
+            if word:
+                tf_counter[word] += 1
+
+        total_terms = sum(tf_counter.values())
+        tf = {word: count / total_terms for word, count in tf_counter.items()}
+
+        features = Counter()
+        for word, tf_val in tf.items():
+            idf_val = self.calculate_idf(word)
+            tfidf = tf_val * idf_val
+            if add_to_indexer:
+                feature_index = self.indexer.add_and_get_index(f"TFIDF={word}", add=True)
+            else:
+                feature_index = self.indexer.index_of(f"TFIDF={word}")
+            if feature_index != -1:
+                features[feature_index] = tfidf
+
+        return features
 
 
 class SentimentClassifier(object):
@@ -176,10 +235,13 @@ def train_perceptron(train_exs: List[SentimentExample], feat_extractor: FeatureE
         learning_rate = initial_learning_rate/ epoch
         for ex in train_exs:
             features = feat_extractor.extract_features(ex.words, add_to_indexer=False)
-            prediction = 1 if sum(weights[feat] * value for feat, value in features.items()) >= 0 else 0
-            if prediction != ex.label:
+            if sum(weights[feat] * value for feat, value in features.items()) >= 0:
+                pred = 1
+            else:
+                pred = 0
+            if pred != ex.label:
                 for feat, value in features.items():
-                    weights[feat] += learning_rate * value * (ex.label - prediction)
+                    weights[feat] += learning_rate * value * (ex.label - pred)
 
         #learning_rate *= 0.9
 
@@ -211,11 +273,6 @@ def get_top_words_and_weights(perceptron_model: PerceptronClassifier, top_n: int
     for word, weight in top_neg_words:
         print(f"{word}: {weight:.4f}")
 
-
-
-
-
-
 # def train_logistic_regression(train_exs: List[SentimentExample], feat_extractor: FeatureExtractor) -> LogisticRegressionClassifier:
 #     """
 #     Train a logistic regression model.
@@ -238,11 +295,11 @@ def train_logistic_regression(train_exs: List[SentimentExample], feat_extractor:
         for ex in train_exs:
             features = feat_extractor.extract_features(ex.words, add_to_indexer=False)
             score = sum(weights[feat] * value for feat, value in features.items())
-            # Predict the probability using sigmoid
-            probability = sigmoid(score)
-            error = ex.label - probability
+
+            probab_scores = sigmoid(score)
+            error_out = ex.label - probab_scores
             for feat, value in features.items():
-                weights[feat] += learning_rate * error * value
+                weights[feat] += learning_rate * error_out * value
 
     return LogisticRegressionClassifier(weights, feat_extractor)
 
@@ -251,14 +308,14 @@ def sigmoid(x):
 
 
 # Log likelihood calculation
-def calculate_log_likelihood(train_exs, feat_extractor, weights):
-    log_likelihood = 0.0
+def calculate_log_like(train_exs, feat_extractor, weights):
+    log_like = 0.0
     for ex in train_exs:
         features = feat_extractor.extract_features(ex.words, add_to_indexer=False)
         score = sum(weights[feat] * value for feat, value in features.items())
-        probability = sigmoid(score)
-        log_likelihood += ex.label * np.log(probability + 1e-10) + (1 - ex.label) * np.log(1 - probability + 1e-10)
-    return log_likelihood
+        probab_scores = sigmoid(score)
+        log_like += ex.label * np.log(probab_scores + 1e-10) + (1 - ex.label) * np.log(1 - probab_scores + 1e-10)
+    return log_like
 
 
 def train_logistic_regression_with_tracking(train_exs: List[SentimentExample], dev_exs: List[SentimentExample],
@@ -270,54 +327,51 @@ def train_logistic_regression_with_tracking(train_exs: List[SentimentExample], d
 
     weights = np.random.uniform(low=-0.01, high=0.01, size=len(feat_extractor.get_indexer()))
 
-    # Tracking lists
-    log_likelihoods = []
+
+    log_likes = []
     dev_accuracies = []
 
-    # Training loop
     for epoch in range(num_epochs):
         np.random.shuffle(train_exs)  # Shuffle training examples
 
-        # Update weights with gradient descent
+
         for ex in train_exs:
             features = feat_extractor.extract_features(ex.words, add_to_indexer=False)
             score = sum(weights[feat] * value for feat, value in features.items())
             probability = sigmoid(score)
-            error = ex.label - probability
+            error_out_out = ex.label - probability
             for feat, value in features.items():
-                weights[feat] += learning_rate * error * value
+                weights[feat] += learning_rate * error_out_out * value
 
-        # Log likelihood for training set
-        log_likelihood = calculate_log_likelihood(train_exs, feat_extractor, weights)
-        log_likelihoods.append(log_likelihood)
 
-        # Evaluate development accuracy
+        log_like = calculate_log_like(train_exs, feat_extractor, weights)
+        log_likes.append(log_like)
+
+
         dev_accuracy = evaluate_accuracy(LogisticRegressionClassifier(weights, feat_extractor), dev_exs)
         dev_accuracies.append(dev_accuracy)
 
-    return weights, log_likelihoods, dev_accuracies
+    return weights, log_likes, dev_accuracies
 
 
-# Evaluate accuracy on a given dataset
+
 def evaluate_accuracy(classifier: SentimentClassifier, examples: List[SentimentExample]) -> float:
     correct = 0
     for ex in examples:
-        prediction = classifier.predict(ex.words)
-        if prediction == ex.label:
+        pred = classifier.predict(ex.words)
+        if pred == ex.label:
             correct += 1
     return correct / len(examples)
 
 
-def plot_log_likelihood_and_accuracy(log_likelihoods_list, dev_accuracies_list, learning_rates, num_epochs):
+def plot_log_like_and_accuracy(log_likes_list, dev_accuracies_list, learning_rates, num_epochs):
     epochs = list(range(1, num_epochs + 1))
 
-    # Plot Log Likelihoods
     plt.figure(figsize=(12, 5))
 
-    # Log Likelihoods subplot
     plt.subplot(1, 2, 1)
-    for i, log_likelihoods in enumerate(log_likelihoods_list):
-        plt.plot(epochs, log_likelihoods, label=f'LR={learning_rates[i]}')
+    for i, log_likes in enumerate(log_likes_list):
+        plt.plot(epochs, log_likes, label=f'LR={learning_rates[i]}')
     plt.title('Log Likelihood vs Epochs')
     plt.xlabel('Epoch')
     plt.ylabel('Log Likelihood')
@@ -336,11 +390,10 @@ def plot_log_likelihood_and_accuracy(log_likelihoods_list, dev_accuracies_list, 
     plt.show()
 
 
-# Run training for different learning rates
 learning_rates = [0.01, 0.1]
 num_epochs = 20
 
-log_likelihoods_list = []
+log_likes_list = []
 dev_accuracies_list = []
 
 
@@ -356,6 +409,8 @@ def train_model(args, train_exs: List[SentimentExample], dev_exs: List[Sentiment
     process, but you should *not* directly train on this data.
     :return: trained SentimentClassifier model, of whichever type is specified
     """
+
+
     # Initialize feature extractor
     if args.model == "TRIVIAL":
         feat_extractor = None
@@ -368,9 +423,12 @@ def train_model(args, train_exs: List[SentimentExample], dev_exs: List[Sentiment
     elif args.feats == "BETTER":
         # Add additional preprocessing code here
         feat_extractor = BetterFeatureExtractor(Indexer())
+        for ex in train_exs:
+            feat_extractor.add_document(ex.words)
     else:
         raise Exception("Pass in UNIGRAM, BIGRAM, or BETTER to run the appropriate system")
     # Train the model
+
 
     if args.model == "TRIVIAL":
         model = TrivialSentimentClassifier()
@@ -380,16 +438,16 @@ def train_model(args, train_exs: List[SentimentExample], dev_exs: List[Sentiment
     elif args.model == "LR":
         model = train_logistic_regression(train_exs, feat_extractor)
 
-        for lr in learning_rates:
-            _, log_likelihoods, dev_accuracies = train_logistic_regression_with_tracking(train_exs, dev_exs,
-                                                                                         feat_extractor,
-                                                                                         num_epochs=num_epochs,
-                                                                                         learning_rate=lr)
-            log_likelihoods_list.append(log_likelihoods)
-            dev_accuracies_list.append(dev_accuracies)
-
-        # Plot the results
-        plot_log_likelihood_and_accuracy(log_likelihoods_list, dev_accuracies_list, learning_rates, num_epochs)
+        # for lr in learning_rates:
+        #     _, log_likes, dev_accuracies = train_logistic_regression_with_tracking(train_exs, dev_exs,
+        #                                                                                  feat_extractor,
+        #                                                                                  num_epochs=num_epochs,
+        #                                                                                  learning_rate=lr)
+        #     log_likes_list.append(log_likes)
+        #     dev_accuracies_list.append(dev_accuracies)
+        #
+        #
+        # plot_log_like_and_accuracy(log_likes_list, dev_accuracies_list, learning_rates, num_epochs)
     else:
         raise Exception("Pass in TRIVIAL, PERCEPTRON, or LR to run the appropriate system")
     return model
